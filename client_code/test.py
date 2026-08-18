@@ -1,1 +1,1 @@
-prin(test)
+pris(test)
