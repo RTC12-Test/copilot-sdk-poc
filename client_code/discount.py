@@ -7,7 +7,7 @@ def apply_bulk_discount(items):
     results = []
     for item in items:
         # BUG: missing closing paren
-        result = calculate_discount(item["price"], item["discount"]
+        result = calculate_discount(item["price"], item["discount"])
         results.append(result)
     return results
 
