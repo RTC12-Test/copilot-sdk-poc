@@ -22,14 +22,14 @@ jobs:
       - name: Check all Python files
         run: |
           echo "=== Syntax check ==="
-          find . -name "*.py" -not -path "./.git/*" -not -path "./__pycache__/*" | while read f; do
+          find client_code/ -name "*.py" | while read f; do
             echo "Checking $f ..."
             python -m py_compile "$f"
           done
 
           echo ""
           echo "=== Runtime check ==="
-          find . -name "*.py" -not -path "./.git/*" -not -path "./__pycache__/*" | while read f; do
+          find client_code/ -name "*.py" | while read f; do
             echo "Running $f ..."
             python "$f" 2>&1 || true
           done

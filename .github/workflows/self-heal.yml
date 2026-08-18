@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
 
       - uses: actions/setup-python@v5
         with:
@@ -34,4 +36,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.HEALER_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.COPILOT_OAUTH_TOKEN }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: python src/healer.py
