@@ -16,4 +16,4 @@ if __name__ == "__main__":
         {"name": "Widget", "price": 100, "discount": 10},
         {"name": "Gadget", "price": 200, "discount": 20},
     ]
-    print(apply_bulk_discount(data))sss
+    print(apply_bulk_discount(data))
