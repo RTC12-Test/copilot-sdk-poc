@@ -70,7 +70,7 @@ def fix_python_syntax(content: str, error_msg: str, line_number: int) -> Optiona
             closes = line.count(")") + line.count("]") + line.count("}")
             diff = opens - closes
             if diff > 0:
-                closing = ")" * line.count("("") + "]" * line.count("[") + "}" * line.count("{")
+                closing = ")" * line.count("(") + "]" * line.count("[") + "}" * line.count("{")
                 # Append closing characters
                 stripped = line.rstrip()
                 lines[target] = stripped + closing
