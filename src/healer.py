@@ -143,15 +143,8 @@ class BuildHealer:
         return None
 
     def get_failure_logs(self, run_id: int) -> str:
-        """Download and concatenate logs from a failed run."""
+        """Fetch failure info from a failed run via check-run annotations."""
         run = self.repo.get_workflow_run(run_id)
-        logs = run.logs_url
-        # PyGitHub exposes logs via download - use requests under the hood
-        # For simplicity we fetch the raw text via the API
-        import requests
-        headers = {"Authorization": f"token {self.github._Github__requester._Requester__authToken}",
-                   "Accept": "application/vnd.github.v3+json"}
-        # Use the checks API to grab job-level logs
         jobs = run.get_jobs()
         log_text = ""
         for job in jobs:
