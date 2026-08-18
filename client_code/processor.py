@@ -19,3 +19,4 @@ if __name__ == "__main__":
     processor = DataProcessor(["  Hello ", " World ", " hello "])
     processor.process()
     print(processor.get_summary()asjdaksjd((())(
+
