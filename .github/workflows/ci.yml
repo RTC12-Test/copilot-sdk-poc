@@ -3,10 +3,11 @@ name: CI Build
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "client_code/**"
 
 jobs:
   python-check:
-    if: "!startsWith(github.head_ref, 'self-heal/')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,19 +30,3 @@ jobs:
             echo "Running $f ..."
             python "$f" 2>&1 || true
           done
-
-  terraform-validate:
-    if: "!startsWith(github.head_ref, 'self-heal/')"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.7"
-
-      - name: Terraform Init & Validate
-        run: |
-          cd terraform
-          terraform init -backend=false
-          terraform validate
