@@ -39,26 +39,62 @@ SCAN_DIR = "client_code"
 
 def scan_python_files(directory: str) -> list[dict]:
     """
-    Scan directory for ALL .py files and check for syntax errors.
+    Scan directory for ALL .py files — syntax errors AND runtime errors.
     Returns list of { file, line, message, content } for files with errors.
     """
+    import subprocess
+
     results = []
+    seen = set()
     py_files = list(Path(directory).glob("**/*.py"))
     logger.info("Scanned %d .py file(s) in %s/", len(py_files), directory)
 
     for filepath in py_files:
         rel_path = str(filepath)
+        with open(filepath) as f:
+            source = f.read()
+
+        # 1. Check syntax
         try:
-            with open(filepath) as f:
-                source = f.read()
             ast.parse(source, filename=rel_path)
         except SyntaxError as e:
-            results.append({
-                "file": rel_path,
-                "line": e.lineno or 1,
-                "message": f"{e.msg}",
-                "content": source,
-            })
+            if rel_path not in seen:
+                results.append({
+                    "file": rel_path,
+                    "line": e.lineno or 1,
+                    "message": f"{e.msg}",
+                    "content": source,
+                })
+                seen.add(rel_path)
+            continue
+
+        # 2. Check runtime errors by actually running the file
+        proc = subprocess.run(
+            ["python3", str(filepath)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip()
+            # Extract error type and message: "NameError: name 'prin' is not defined"
+            err_match = re.search(r"(\w+Error|\w+Exception):\s*(.+)", err)
+            # Extract line number: "  File "test.py", line 1"
+            line_match = re.search(r'File "[^"]+", line (\d+)', err)
+
+            if err_match:
+                error_type = err_match.group(1)
+                error_msg = err_match.group(2)
+                line_num = int(line_match.group(1)) if line_match else 1
+
+                if rel_path not in seen:
+                    results.append({
+                        "file": rel_path,
+                        "line": line_num,
+                        "message": f"{error_type}: {error_msg}",
+                        "content": source,
+                    })
+                    seen.add(rel_path)
 
     return results
 
