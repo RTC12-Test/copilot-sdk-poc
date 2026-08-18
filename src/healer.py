@@ -22,7 +22,7 @@ import re
 import json
 import logging
 from typing import Optional
-from github import Github, GithubException
+from github import Github, Auth, GithubException
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("self-healer")
@@ -122,7 +122,7 @@ def fix_terraform_syntax(content: str, error_msg: str, line_number: int) -> Opti
 
 class BuildHealer:
     def __init__(self, token: str, repo_name: str):
-        self.github = Github(token)
+        self.github = Github(auth=Auth.Token(token))
         self.repo = self.github.get_repo(repo_name)
         logger.info("Initialised healer for repo %s", repo_name)
 
@@ -130,7 +130,7 @@ class BuildHealer:
 
     def get_failed_run(self) -> Optional[dict]:
         """Return the latest failed workflow run, or None."""
-        runs = self.repo.get_workflow_runs(status="failure", branch="main", per_page=1)
+        runs = self.repo.get_workflow_runs(status="failure", branch="main")
         for run in runs:
             if run.conclusion == "failure":
                 return {
