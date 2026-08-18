@@ -149,28 +149,79 @@ class BuildHealer:
 
     def get_failure_annotations(self, run_id: int) -> tuple[str, list[dict]]:
         """
-        Fetch check-run annotations from a failed run.
+        Fetch raw logs from failed jobs and parse source-file errors.
         Returns (raw_log_text, parsed_errors).
         """
+        import io
+        import zipfile
+        import requests
+
         run = self.repo.get_workflow_run(run_id)
         log_text = ""
 
-        jobs = run.jobs()
-        for job in jobs:
-            for step in job.steps:
-                if step.conclusion == "failure":
-                    log_text += f"FAILED STEP: {step.name}\n"
+        # Download raw logs via REST API (logs_url returns a zip)
+        headers = {"Authorization": f"Bearer {self.token}"}
+        resp = requests.get(run.logs_url, headers=headers, allow_redirects=True)
+        logger.info("Logs download: HTTP %d, %d bytes", resp.status_code, len(resp.content))
+        if resp.status_code == 200 and len(resp.content) > 0:
+            try:
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    for name in zf.namelist():
+                        content = zf.read(name).decode(errors="replace")
+                        log_text += content + "\n"
+            except zipfile.BadZipFile:
+                # Might be a plain text redirect, not a zip
+                log_text = resp.text
+        else:
+            logger.warning("Could not download logs (HTTP %d)", resp.status_code)
 
-        commit = self.repo.get_commit(run.head_sha)
-        check_runs = commit.get_check_runs()
-        for cr in check_runs:
-            if cr.conclusion == "failure":
-                for ann in cr.get_annotations():
-                    log_text += f"FILE: {ann.path} LINE: {ann.start_line} MSG: {ann.message}\n"
+        logger.info("Raw log length: %d chars", len(log_text))
+        if log_text:
+            # Print first 500 chars for debugging
+            logger.info("Log preview:\n%s", log_text[:500])
 
-        errors = parse_error_annotations(log_text)
-        # Filter out workflow files — we fix source code, not CI config
-        errors = [e for e in errors if not e["file"].startswith(".github")]
+        # Strip ANSI escape codes that GitHub adds to logs
+        log_text = re.sub(r"\x1b\[[0-9;]*m", "", log_text)
+
+        # Parse Python errors: File "app.py", line N ... SyntaxError: ...
+        for m in re.finditer(
+            r'File "(?P<file>[^"]+)", line (?P<line>\d+)',
+            log_text,
+        ):
+            path = m.group("file")
+            if path.startswith(".github"):
+                continue
+            # Look for SyntaxError or IndentationError nearby
+            after = log_text[m.end():m.end()+500]
+            err_match = re.search(r"(SyntaxError|IndentationError|NameError|TypeError|AttributeError|ImportError): (?P<msg>.+)", after)
+            if err_match:
+                log_text += f"FILE: {path} LINE: {m.group('line')} MSG: {err_match.group(0)}\n"
+
+        # Parse Terraform errors: Error: ... \n\n  on s3.tf line N
+        for m in re.finditer(
+            r'Error: (?P<msg>.+)\n\n\s*on (?P<file>\S+) line (?P<line>\d+)',
+            log_text,
+        ):
+            path = m.group("file")
+            if not path.startswith(".github"):
+                log_text += f"FILE: {path} LINE: {m.group('line')} MSG: {m.group('msg')}\n"
+
+        # Also try the simpler "on FILE line N" pattern for Terraform
+        for m in re.finditer(
+            r'\x1b\[31m│\x1b\[0m \x1b\[0m\x1b\[31mError: (?P<msg>.+?)\x1b\[0m',
+            log_text,
+        ):
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", m.group("msg"))
+            # Find the file/line that follows
+            after = log_text[m.end():m.end()+500]
+            file_match = re.search(r"on (?P<file>\S+) line (?P<line>\d+)", after)
+            if file_match:
+                path = file_match.group("file")
+                if not path.startswith(".github"):
+                    log_text += f"FILE: {path} LINE: {file_match.group('line')} MSG: {msg}\n"
+
+        errors = [e for e in parse_error_annotations(log_text) if not e["file"].startswith(".github")]
+        logger.info("Parsed %d source-file error(s) from logs", len(errors))
         return log_text, errors
 
     def fetch_file(self, path: str, ref: str = "main") -> Optional[str]:
