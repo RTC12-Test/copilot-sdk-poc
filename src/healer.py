@@ -1,8 +1,8 @@
 """
 Self-Healing Build Pipeline — GitHub Copilot SDK + PyGitHub
 
-Scans client_code/ for Python files with syntax errors,
-uses Copilot SDK to generate fixes, opens separate PRs per file.
+Scans client_code/ for ALL .py files with syntax errors,
+uses Copilot SDK to generate fixes, opens ONE PR with all fixes.
 
 Usage:
   Set environment variables:
@@ -16,7 +16,7 @@ Usage:
 import os
 import re
 import ast
-import subprocess
+import time
 import asyncio
 import logging
 from pathlib import Path
@@ -34,16 +34,17 @@ SCAN_DIR = "client_code"
 
 
 # ---------------------------------------------------------------------------
-# Local file scanning — find Python syntax errors
+# Local file scanning — find Python syntax errors in ALL .py files
 # ---------------------------------------------------------------------------
 
 def scan_python_files(directory: str) -> list[dict]:
     """
-    Scan directory for .py files and check for syntax errors.
+    Scan directory for ALL .py files and check for syntax errors.
     Returns list of { file, line, message, content } for files with errors.
     """
     results = []
     py_files = list(Path(directory).glob("**/*.py"))
+    logger.info("Scanned %d .py file(s) in %s/", len(py_files), directory)
 
     for filepath in py_files:
         rel_path = str(filepath)
@@ -58,7 +59,6 @@ def scan_python_files(directory: str) -> list[dict]:
                 "message": f"{e.msg}",
                 "content": source,
             })
-            logger.info("  Found error in %s:%d — %s", rel_path, e.lineno, e.msg)
 
     return results
 
@@ -120,7 +120,6 @@ async def copilot_fix(
     finally:
         await client.stop()
 
-    # Strip markdown fences if Copilot wrapped them
     cleaned = response_text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```\w*\n?", "", cleaned)
@@ -130,7 +129,7 @@ async def copilot_fix(
 
 
 # ---------------------------------------------------------------------------
-# GitHub interaction (PyGitHub) — one PR per file
+# GitHub interaction (PyGitHub) — single PR with all fixes
 # ---------------------------------------------------------------------------
 
 class BuildHealer:
@@ -141,85 +140,52 @@ class BuildHealer:
         self.repo = self.github.get_repo(repo_name)
         logger.info("Initialised healer for repo %s", repo_name)
 
-    def fetch_file(self, path: str, ref: str = "main") -> Optional[str]:
-        """Fetch file content from the repo."""
-        try:
-            data = self.repo.get_contents(path, ref=ref)
-            if isinstance(data, list):
-                logger.warning("Path %s is a directory, not a file", path)
-                return None
-            return data.decoded_content.decode()
-        except GithubException:
-            logger.warning("Could not fetch %s", path)
-            return None
-
-    def _get_unique_branch(self, base_name: str) -> str:
-        """Get a unique branch name, appending -v2, -v3 etc if previous exists."""
-        repo = self.repo
-        branch = base_name
-        version = 2
-
-        # Check if branch exists and has an open PR
-        try:
-            repo.get_branch(branch)
-            # Branch exists — check for open PR
-            prs = repo.get_pulls(state="open", head=f"{repo.full_name}:{branch}")
-            if list(prs):
-                logger.info("Branch %s has open PR #%d, creating new branch",
-                            branch, list(prs)[0].number)
-                while True:
-                    branch = f"{base_name}-v{version}"
-                    try:
-                        repo.get_branch(branch)
-                        version += 1
-                    except GithubException:
-                        break
-        except GithubException:
-            pass  # Branch doesn't exist, use it as-is
-
-        return branch
-
-    def raise_fix_pr(self, branch_name: str, path: str, new_content: str, errors: list[dict]) -> str:
-        """Create branch, commit fix, open PR. Returns PR URL."""
+    def raise_fix_pr(self, fixes: dict[str, str], all_errors: list[dict]) -> str:
+        """
+        Create one branch, commit all fixes, open one PR.
+        fixes = { file_path: new_content }
+        """
         repo = self.repo
         default_branch = repo.default_branch
         base = repo.get_branch(default_branch)
 
-        safe_name = branch_name.replace("/", "-")
-        unique_branch = self._get_unique_branch(safe_name)
-        repo.create_git_ref(ref=f"refs/heads/{unique_branch}", sha=base.commit.sha)
+        branch = f"self-heal/run-{int(time.time())}"
+        repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base.commit.sha)
 
-        # Check if file exists on main, create or update
-        try:
-            file_data = repo.get_contents(path, ref=unique_branch)
-            if isinstance(file_data, list):
-                raise ValueError(f"Path {path} is a directory")
-            repo.update_file(
-                path=path,
-                message=f"self-heal: fix syntax error in {path}",
-                content=new_content,
-                sha=file_data.sha,
-                branch=unique_branch,
-            )
-        except GithubException:
-            repo.create_file(
-                path=path,
-                message=f"self-heal: fix syntax error in {path}",
-                content=new_content,
-                branch=unique_branch,
-            )
+        for path, new_content in fixes.items():
+            try:
+                file_data = repo.get_contents(path, ref=branch)
+                if isinstance(file_data, list):
+                    continue
+                repo.update_file(
+                    path=path,
+                    message=f"self-heal: fix syntax error in {path}",
+                    content=new_content,
+                    sha=file_data.sha,
+                    branch=branch,
+                )
+            except GithubException:
+                repo.create_file(
+                    path=path,
+                    message=f"self-heal: fix syntax error in {path}",
+                    content=new_content,
+                    branch=branch,
+                )
 
-        error_summary = "\n".join(f"- line `{e['line']}`: {e['message']}" for e in errors)
+        files_list = "\n".join(f"- `{p}`" for p in fixes.keys())
+        error_summary = "\n".join(
+            f"- `{e['file']}:{e['line']}` — {e['message']}" for e in all_errors
+        )
 
         pr = repo.create_pull(
-            title=f"[Self-Heal] Fix syntax error in `{path}`",
+            title=f"[Self-Heal] Fix syntax errors in {len(fixes)} file(s)",
             body=(
                 f"## Automated Remediation\n\n"
-                f"**File:** `{path}`\n"
+                f"**Fixed files:**\n{files_list}\n\n"
                 f"**Errors:**\n{error_summary}\n\n"
                 f"Fix generated by **GitHub Copilot SDK** and auto-committed."
             ),
-            head=unique_branch,
+            head=branch,
             base=default_branch,
         )
 
@@ -227,45 +193,52 @@ class BuildHealer:
         return pr.html_url
 
     def run(self):
-        """Scan local files → Copilot fix → PR per file."""
-        logger.info("Scanning %s/ for Python files with errors...", SCAN_DIR)
+        """Scan ALL .py files → Copilot fix each → ONE PR with all fixes."""
+        logger.info("Scanning %s/ for ALL Python files...", SCAN_DIR)
 
         errors = scan_python_files(SCAN_DIR)
         if not errors:
             logger.info("No syntax errors found. All files OK!")
             return
 
-        logger.info("Found %d file(s) with errors", len(errors))
+        logger.info("Found %d file(s) with errors:", len(errors))
+        for e in errors:
+            logger.info("  %s:%d — %s", e["file"], e["line"], e["message"])
 
-        # Process each errored file — separate PR for each
+        fixes = {}
         for error in errors:
             path = error["file"]
             file_content = error["content"]
-
             logger.info("Asking Copilot to fix %s ...", path)
+
             fixed_content = asyncio.run(
                 copilot_fix(path, file_content, [error], self.oauth_token)
             )
 
             if not fixed_content:
-                logger.warning("Copilot returned empty fix for %s", path)
+                logger.warning("Copilot returned empty fix for %s — skipping", path)
                 continue
 
             if fixed_content.strip() == file_content.strip():
-                logger.info("Copilot returned unchanged content for %s — skipping", path)
+                logger.warning("Copilot returned UNCHANGED content for %s — skipping", path)
                 continue
 
-            # Verify the fix actually resolves the syntax error
             try:
                 ast.parse(fixed_content)
                 logger.info("Fix verified OK for %s", path)
             except SyntaxError as e:
-                logger.warning("Copilot fix still has errors in %s: %s", path, e)
+                logger.warning("Copilot fix STILL HAS ERRORS in %s: %s — skipping", path, e)
                 continue
 
-            branch = f"self-heal/{path.replace('/', '-').replace('.py', '')}"
-            pr_url = self.raise_fix_pr(branch, path, fixed_content, [error])
-            logger.info("Remediation PR: %s", pr_url)
+            fixes[path] = fixed_content
+
+        if not fixes:
+            logger.warning("No fixes generated. Nothing to commit.")
+            return
+
+        logger.info("Creating single PR with %d fixed file(s)...", len(fixes))
+        pr_url = self.raise_fix_pr(fixes, errors)
+        logger.info("Done! PR: %s", pr_url)
 
 
 # ---------------------------------------------------------------------------
