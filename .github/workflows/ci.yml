@@ -17,7 +17,9 @@ jobs:
           python-version: "3.12"
 
       - name: Lint Python
-        run: python -m py_compile app.py
+        run: |
+          python -m py_compile app.py
+          for f in client_code/*.py; do python -m py_compile "$f"; done
 
   terraform-validate:
     runs-on: ubuntu-latest

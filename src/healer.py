@@ -1,12 +1,13 @@
 """
 Self-Healing Build Pipeline — GitHub Copilot SDK + PyGitHub
 
-Monitors GitHub Actions workflow runs for failures, uses Copilot to
-generate the fix, then opens a PR with the remediation.
+Scans client_code/ for Python files with syntax errors,
+uses Copilot SDK to generate fixes, opens separate PRs per file.
 
 Usage:
   Set environment variables:
     GITHUB_TOKEN  - GitHub PAT with repo + workflow permissions
+    GH_TOKEN      - GitHub OAuth token for Copilot SDK (gho_...)
     GITHUB_REPO   - owner/repo to monitor
 
   python src/healer.py
@@ -14,8 +15,11 @@ Usage:
 
 import os
 import re
+import ast
+import subprocess
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 
 from github import Github, Auth, GithubException
@@ -26,57 +30,62 @@ from copilot.session_events import SessionEventType
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("self-healer")
 
+SCAN_DIR = "client_code"
+
 
 # ---------------------------------------------------------------------------
-# Error extraction (parse annotations from GitHub API)
+# Local file scanning — find Python syntax errors
 # ---------------------------------------------------------------------------
 
-def parse_error_annotations(log_text: str) -> list[dict]:
+def scan_python_files(directory: str) -> list[dict]:
     """
-    Extract structured error info from check-run annotation lines.
-    Returns list of { file, line, message } dicts.
+    Scan directory for .py files and check for syntax errors.
+    Returns list of { file, line, message, content } for files with errors.
     """
-    errors = []
-    for line in log_text.splitlines():
-        m = re.match(r"FILE:\s*(\S+)\s+LINE:\s*(\d+)\s+MSG:\s*(.+)", line)
-        if m:
-            errors.append({
-                "file": m.group(1),
-                "line": int(m.group(2)),
-                "message": m.group(3),
+    results = []
+    py_files = list(Path(directory).glob("**/*.py"))
+
+    for filepath in py_files:
+        rel_path = str(filepath)
+        try:
+            with open(filepath) as f:
+                source = f.read()
+            ast.parse(source, filename=rel_path)
+        except SyntaxError as e:
+            results.append({
+                "file": rel_path,
+                "line": e.lineno or 1,
+                "message": f"{e.msg}",
+                "content": source,
             })
-    return errors
+            logger.info("  Found error in %s:%d — %s", rel_path, e.lineno, e.msg)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Copilot-powered fix generation
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are a build-fix bot. You receive a CI/CD build error and the full
-source file that contains the error. You must return ONLY the corrected
-file content — no explanation, no markdown fences, no commentary.
-The output must be the exact file content that should be committed.
-"""
-
-
 def _build_fix_prompt(file_path: str, file_content: str, errors: list[dict]) -> str:
     error_block = "\n".join(
-        f"  - {e['file']}:{e['line']}: {e['message']}" for e in errors
+        f"  - line {e['line']}: {e['message']}" for e in errors
     )
     return f"""\
-The following file has build errors:
+The following Python file has syntax errors. Fix ALL errors and return the
+complete corrected file content. Return ONLY the file content — no markdown
+fences, no explanation, no commentary.
 
 File: {file_path}
 Errors:
 {error_block}
 
 Current file content:
-```{file_path.rsplit('.', 1)[-1]}
+```python
 {file_content}
 ```
 
-Return the complete corrected file content. Only the file content, nothing else."""
+Return the complete corrected file content."""
 
 
 async def copilot_fix(
@@ -114,16 +123,14 @@ async def copilot_fix(
     # Strip markdown fences if Copilot wrapped them
     cleaned = response_text.strip()
     if cleaned.startswith("```"):
-        # Remove opening fence (```lang or ```)
         cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-        # Remove closing fence
         cleaned = re.sub(r"\n?```\s*$", "", cleaned)
 
     return cleaned if cleaned else None
 
 
 # ---------------------------------------------------------------------------
-# GitHub interaction (PyGitHub)
+# GitHub interaction (PyGitHub) — one PR per file
 # ---------------------------------------------------------------------------
 
 class BuildHealer:
@@ -133,97 +140,6 @@ class BuildHealer:
         self.github = Github(auth=Auth.Token(token))
         self.repo = self.github.get_repo(repo_name)
         logger.info("Initialised healer for repo %s", repo_name)
-
-    def get_failed_run(self) -> Optional[dict]:
-        """Return the latest failed workflow run, or None."""
-        runs = self.repo.get_workflow_runs(status="failure", branch="main")
-        for run in runs:
-            if run.conclusion == "failure":
-                return {
-                    "id": run.id,
-                    "head_sha": run.head_sha,
-                    "head_branch": run.head_branch,
-                    "html_url": run.html_url,
-                    "name": run.name,
-                }
-        return None
-
-    def get_failure_annotations(self, run_id: int) -> tuple[str, list[dict]]:
-        """
-        Fetch raw logs from failed jobs and parse source-file errors.
-        Returns (raw_log_text, parsed_errors).
-        """
-        import io
-        import zipfile
-        import requests
-
-        run = self.repo.get_workflow_run(run_id)
-        log_text = ""
-
-        # Download raw logs via REST API (logs_url returns a zip)
-        headers = {"Authorization": f"Bearer {self.token}"}
-        resp = requests.get(run.logs_url, headers=headers, allow_redirects=True)
-        logger.info("Logs download: HTTP %d, %d bytes", resp.status_code, len(resp.content))
-        if resp.status_code == 200 and len(resp.content) > 0:
-            try:
-                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                    for name in zf.namelist():
-                        content = zf.read(name).decode(errors="replace")
-                        log_text += content + "\n"
-            except zipfile.BadZipFile:
-                # Might be a plain text redirect, not a zip
-                log_text = resp.text
-        else:
-            logger.warning("Could not download logs (HTTP %d)", resp.status_code)
-
-        logger.info("Raw log length: %d chars", len(log_text))
-        if log_text:
-            # Print first 500 chars for debugging
-            logger.info("Log preview:\n%s", log_text[:500])
-
-        # Strip ANSI escape codes that GitHub adds to logs
-        log_text = re.sub(r"\x1b\[[0-9;]*m", "", log_text)
-
-        # Parse Python errors: File "app.py", line N ... SyntaxError: ...
-        for m in re.finditer(
-            r'File "(?P<file>[^"]+)", line (?P<line>\d+)',
-            log_text,
-        ):
-            path = m.group("file")
-            if path.startswith(".github"):
-                continue
-            # Look for SyntaxError or IndentationError nearby
-            after = log_text[m.end():m.end()+500]
-            err_match = re.search(r"(SyntaxError|IndentationError|NameError|TypeError|AttributeError|ImportError): (?P<msg>.+)", after)
-            if err_match:
-                log_text += f"FILE: {path} LINE: {m.group('line')} MSG: {err_match.group(0)}\n"
-
-        # Parse Terraform errors: Error: ... \n\n  on s3.tf line N
-        for m in re.finditer(
-            r'Error: (?P<msg>.+)\n\n\s*on (?P<file>\S+) line (?P<line>\d+)',
-            log_text,
-        ):
-            path = m.group("file")
-            if not path.startswith(".github"):
-                log_text += f"FILE: {path} LINE: {m.group('line')} MSG: {m.group('msg')}\n"
-
-        # Also try the simpler "on FILE line N" pattern for Terraform
-        for m in re.finditer(
-            r'\x1b\[31m│\x1b\[0m \x1b\[0m\x1b\[31mError: (?P<msg>.+?)\x1b\[0m',
-            log_text,
-        ):
-            msg = re.sub(r"\x1b\[[0-9;]*m", "", m.group("msg"))
-            # Find the file/line that follows
-            after = log_text[m.end():m.end()+500]
-            file_match = re.search(r"on (?P<file>\S+) line (?P<line>\d+)", after)
-            if file_match:
-                path = file_match.group("file")
-                if not path.startswith(".github"):
-                    log_text += f"FILE: {path} LINE: {file_match.group('line')} MSG: {msg}\n"
-
-        errors = [e for e in parse_error_annotations(log_text) if not e["file"].startswith(".github")]
-        logger.info("Parsed %d source-file error(s) from logs", len(errors))
-        return log_text, errors
 
     def fetch_file(self, path: str, ref: str = "main") -> Optional[str]:
         """Fetch file content from the repo."""
@@ -237,35 +153,73 @@ class BuildHealer:
             logger.warning("Could not fetch %s", path)
             return None
 
+    def _get_unique_branch(self, base_name: str) -> str:
+        """Get a unique branch name, appending -v2, -v3 etc if previous exists."""
+        repo = self.repo
+        branch = base_name
+        version = 2
+
+        # Check if branch exists and has an open PR
+        try:
+            repo.get_branch(branch)
+            # Branch exists — check for open PR
+            prs = repo.get_pulls(state="open", head=f"{repo.full_name}:{branch}")
+            if list(prs):
+                logger.info("Branch %s has open PR #%d, creating new branch",
+                            branch, list(prs)[0].number)
+                while True:
+                    branch = f"{base_name}-v{version}"
+                    try:
+                        repo.get_branch(branch)
+                        version += 1
+                    except GithubException:
+                        break
+        except GithubException:
+            pass  # Branch doesn't exist, use it as-is
+
+        return branch
+
     def raise_fix_pr(self, branch_name: str, path: str, new_content: str, errors: list[dict]) -> str:
         """Create branch, commit fix, open PR. Returns PR URL."""
         repo = self.repo
         default_branch = repo.default_branch
         base = repo.get_branch(default_branch)
 
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
+        safe_name = branch_name.replace("/", "-")
+        unique_branch = self._get_unique_branch(safe_name)
+        repo.create_git_ref(ref=f"refs/heads/{unique_branch}", sha=base.commit.sha)
 
-        file_data = repo.get_contents(path, ref=branch_name)
-        if isinstance(file_data, list):
-            raise ValueError(f"Path {path} is a directory")
-        repo.update_file(
-            path=path,
-            message=f"self-heal: fix build error in {path}",
-            content=new_content,
-            sha=file_data.sha,
-            branch=branch_name,
-        )
+        # Check if file exists on main, create or update
+        try:
+            file_data = repo.get_contents(path, ref=unique_branch)
+            if isinstance(file_data, list):
+                raise ValueError(f"Path {path} is a directory")
+            repo.update_file(
+                path=path,
+                message=f"self-heal: fix syntax error in {path}",
+                content=new_content,
+                sha=file_data.sha,
+                branch=unique_branch,
+            )
+        except GithubException:
+            repo.create_file(
+                path=path,
+                message=f"self-heal: fix syntax error in {path}",
+                content=new_content,
+                branch=unique_branch,
+            )
 
-        error_summary = "\n".join(f"- `{e['file']}:{e['line']}` — {e['message']}" for e in errors)
+        error_summary = "\n".join(f"- line `{e['line']}`: {e['message']}" for e in errors)
 
         pr = repo.create_pull(
-            title=f"[Self-Heal] Fix build error in `{path}`",
+            title=f"[Self-Heal] Fix syntax error in `{path}`",
             body=(
                 f"## Automated Remediation\n\n"
-                f"**Detected errors:**\n{error_summary}\n\n"
+                f"**File:** `{path}`\n"
+                f"**Errors:**\n{error_summary}\n\n"
                 f"Fix generated by **GitHub Copilot SDK** and auto-committed."
             ),
-            head=branch_name,
+            head=unique_branch,
             base=default_branch,
         )
 
@@ -273,31 +227,20 @@ class BuildHealer:
         return pr.html_url
 
     def run(self):
-        """Main entry: poll for failures → Copilot fix → PR."""
-        logger.info("Polling for failed workflow runs...")
+        """Scan local files → Copilot fix → PR per file."""
+        logger.info("Scanning %s/ for Python files with errors...", SCAN_DIR)
 
-        failed = self.get_failed_run()
-        if not failed:
-            logger.info("No failed runs detected. All green!")
-            return
-
-        logger.info("Detected failed run %d (%s)", failed["id"], failed["html_url"])
-
-        log_text, errors = self.get_failure_annotations(failed["id"])
+        errors = scan_python_files(SCAN_DIR)
         if not errors:
-            logger.warning("No parseable errors in annotations. Manual intervention needed.")
+            logger.info("No syntax errors found. All files OK!")
             return
 
-        logger.info("Found %d error(s):", len(errors))
-        for e in errors:
-            logger.info("  %s:%d — %s", e["file"], e["line"], e["message"])
+        logger.info("Found %d file(s) with errors", len(errors))
 
-        # Process each errored file
+        # Process each errored file — separate PR for each
         for error in errors:
             path = error["file"]
-            file_content = self.fetch_file(path)
-            if not file_content:
-                continue
+            file_content = error["content"]
 
             logger.info("Asking Copilot to fix %s ...", path)
             fixed_content = asyncio.run(
@@ -308,11 +251,19 @@ class BuildHealer:
                 logger.warning("Copilot returned empty fix for %s", path)
                 continue
 
-            if fixed_content == file_content:
+            if fixed_content.strip() == file_content.strip():
                 logger.info("Copilot returned unchanged content for %s — skipping", path)
                 continue
 
-            branch = f"self-heal/{path.replace('/', '-')}"
+            # Verify the fix actually resolves the syntax error
+            try:
+                ast.parse(fixed_content)
+                logger.info("Fix verified OK for %s", path)
+            except SyntaxError as e:
+                logger.warning("Copilot fix still has errors in %s: %s", path, e)
+                continue
+
+            branch = f"self-heal/{path.replace('/', '-').replace('.py', '')}"
             pr_url = self.raise_fix_pr(branch, path, fixed_content, [error])
             logger.info("Remediation PR: %s", pr_url)
 
@@ -332,4 +283,3 @@ if __name__ == "__main__":
 
     healer = BuildHealer(token, oauth_token, repo_name)
     healer.run()
-
