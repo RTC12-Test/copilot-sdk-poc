@@ -10,7 +10,7 @@ def process_data(data):
     results = []
     for item in data:
         # BUG: missing closing parenthesis - syntax error
-        result = calculate_average(item["values"]
+        result = calculate_average(item["values"])
         results.append(result)
     return results
 
