@@ -83,7 +83,7 @@ async def copilot_fix(
     file_path: str,
     file_content: str,
     errors: list[dict],
-    github_token: str,
+    oauth_token: str,
 ) -> Optional[str]:
     """
     Ask Copilot to generate a fix for the given file and errors.
@@ -92,7 +92,7 @@ async def copilot_fix(
     prompt = _build_fix_prompt(file_path, file_content, errors)
     response_text = ""
 
-    client = CopilotClient(github_token=github_token)
+    client = CopilotClient(github_token=oauth_token)
     await client.start()
 
     try:
@@ -127,8 +127,9 @@ async def copilot_fix(
 # ---------------------------------------------------------------------------
 
 class BuildHealer:
-    def __init__(self, token: str, repo_name: str):
+    def __init__(self, token: str, oauth_token: str, repo_name: str):
         self.token = token
+        self.oauth_token = oauth_token
         self.github = Github(auth=Auth.Token(token))
         self.repo = self.github.get_repo(repo_name)
         logger.info("Initialised healer for repo %s", repo_name)
@@ -300,7 +301,7 @@ class BuildHealer:
 
             logger.info("Asking Copilot to fix %s ...", path)
             fixed_content = asyncio.run(
-                copilot_fix(path, file_content, [error], self.token)
+                copilot_fix(path, file_content, [error], self.oauth_token)
             )
 
             if not fixed_content:
@@ -322,12 +323,13 @@ class BuildHealer:
 
 if __name__ == "__main__":
     token = os.environ.get("GITHUB_TOKEN")
+    oauth_token = os.environ.get("GH_TOKEN")
     repo_name = os.environ.get("GITHUB_REPO")
 
-    if not token or not repo_name:
-        logger.error("Set GITHUB_TOKEN and GITHUB_REPO environment variables.")
+    if not token or not oauth_token or not repo_name:
+        logger.error("Set GITHUB_TOKEN, GH_TOKEN, and GITHUB_REPO environment variables.")
         raise SystemExit(1)
 
-    healer = BuildHealer(token, repo_name)
+    healer = BuildHealer(token, oauth_token, repo_name)
     healer.run()
 
