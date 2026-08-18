@@ -168,12 +168,18 @@ class BuildHealer:
                 for ann in cr.get_annotations():
                     log_text += f"FILE: {ann.path} LINE: {ann.start_line} MSG: {ann.message}\n"
 
-        return log_text, parse_error_annotations(log_text)
+        errors = parse_error_annotations(log_text)
+        # Filter out workflow files — we fix source code, not CI config
+        errors = [e for e in errors if not e["file"].startswith(".github")]
+        return log_text, errors
 
     def fetch_file(self, path: str, ref: str = "main") -> Optional[str]:
         """Fetch file content from the repo."""
         try:
             data = self.repo.get_contents(path, ref=ref)
+            if isinstance(data, list):
+                logger.warning("Path %s is a directory, not a file", path)
+                return None
             return data.decoded_content.decode()
         except GithubException:
             logger.warning("Could not fetch %s", path)
@@ -188,6 +194,8 @@ class BuildHealer:
         repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
 
         file_data = repo.get_contents(path, ref=branch_name)
+        if isinstance(file_data, list):
+            raise ValueError(f"Path {path} is a directory")
         repo.update_file(
             path=path,
             message=f"self-heal: fix build error in {path}",
