@@ -1,2 +1,2 @@
 PyGitHub>=2.3.0
-requests>=2.31.0
+github-copilot-sdk>=1.0.0
