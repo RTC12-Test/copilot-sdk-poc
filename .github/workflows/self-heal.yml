@@ -26,8 +26,12 @@ jobs:
           pip install -r requirements.txt
           python -m copilot download-runtime
 
+      - name: Configure gh auth
+        run: echo "${{ secrets.COPILOT_OAUTH_TOKEN }}" | gh auth login --with-token
+
       - name: Run self-healer
         env:
           GITHUB_TOKEN: ${{ secrets.HEALER_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.COPILOT_OAUTH_TOKEN }}
         run: python src/healer.py
