@@ -20,4 +20,4 @@ if __name__ == "__main__":
         {"name": "batch2", "values": [40, 50, 60]},
     ]
     output = process_data(sample_data)
-    print(f"Results: {output}")fasd
+    print(f"Results: {output}")

@@ -17,4 +17,4 @@ def validate_config(config):
 
 if __name__ == "__main__":
     cfg = read_config("settings.ini")
-    validate_config(cfg)asd
+    validate_config(cfg)
