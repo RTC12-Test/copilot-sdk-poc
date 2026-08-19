@@ -1,1 +1,1 @@
-pris(test)
+print(test)
