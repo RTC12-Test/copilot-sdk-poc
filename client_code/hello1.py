@@ -1,1 +1,2 @@
-testasds
+testasds = "testasds"
+print(testasds)
