@@ -1,1 +1,1 @@
-prisss(test)
+print("test")
