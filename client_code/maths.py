@@ -1,5 +1,6 @@
 def main():
-    a=1/0
+    a = 1 / 1
     print(a)
 
-main()
+if __name__ == "__main__":
+    main()
