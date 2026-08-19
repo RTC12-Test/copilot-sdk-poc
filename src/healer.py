@@ -124,21 +124,18 @@ Current file content:
 Return the complete corrected file content."""
 
 
-async def copilot_fix(
-    file_path: str,
-    file_content: str,
-    errors: list[dict],
+async def copilot_fix_all(
+    file_errors: dict[str, tuple[str, list[dict]]],
     oauth_token: str,
-) -> Optional[str]:
+) -> dict[str, str]:
     """
-    Ask Copilot to generate a fix for the given file and errors.
-    Returns the fixed file content or None.
+    Fix all files in one Copilot session.
+    file_errors = { file_path: (file_content, errors) }
+    Returns { file_path: fixed_content } for successful fixes only.
     """
-    prompt = _build_fix_prompt(file_path, file_content, errors)
-    response_text = ""
-
     client = CopilotClient(github_token=oauth_token)
     await client.start()
+    fixes = {}
 
     try:
         session = await client.create_session(
@@ -146,22 +143,41 @@ async def copilot_fix(
             model="gpt-5",
         )
 
-        def on_event(event):
-            nonlocal response_text
-            if event.type == SessionEventType.ASSISTANT_MESSAGE_DELTA:
-                response_text += event.data.delta_content
+        for file_path, (file_content, errors) in file_errors.items():
+            prompt = _build_fix_prompt(file_path, file_content, errors)
+            response_text = ""
 
-        session.on(on_event)
-        await session.send_and_wait(prompt)
+            def on_event(event):
+                nonlocal response_text
+                if event.type == SessionEventType.ASSISTANT_MESSAGE_DELTA:
+                    response_text += event.data.delta_content
+
+            session.on(on_event)
+            await session.send_and_wait(prompt)
+
+            cleaned = response_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+                cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+
+            if not cleaned:
+                logger.warning("Copilot returned empty fix for %s — skipping", file_path)
+                continue
+
+            if cleaned.strip() == file_content.strip():
+                logger.warning("Copilot returned UNCHANGED content for %s — skipping", file_path)
+                continue
+
+            try:
+                ast.parse(cleaned)
+                logger.info("Fix verified OK for %s", file_path)
+                fixes[file_path] = cleaned
+            except SyntaxError as e:
+                logger.warning("Copilot fix STILL HAS ERRORS in %s: %s — skipping", file_path, e)
     finally:
         await client.stop()
 
-    cleaned = response_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```\s*$", "", cleaned)
-
-    return cleaned if cleaned else None
+    return fixes
 
 
 # ---------------------------------------------------------------------------
@@ -242,32 +258,11 @@ class BuildHealer:
         for e in errors:
             logger.info("  %s:%d — %s", e["file"], e["line"], e["message"])
 
-        fixes = {}
+        file_errors = {}
         for error in errors:
-            path = error["file"]
-            file_content = error["content"]
-            logger.info("Asking Copilot to fix %s ...", path)
+            file_errors[error["file"]] = (error["content"], [error])
 
-            fixed_content = asyncio.run(
-                copilot_fix(path, file_content, [error], self.oauth_token)
-            )
-
-            if not fixed_content:
-                logger.warning("Copilot returned empty fix for %s — skipping", path)
-                continue
-
-            if fixed_content.strip() == file_content.strip():
-                logger.warning("Copilot returned UNCHANGED content for %s — skipping", path)
-                continue
-
-            try:
-                ast.parse(fixed_content)
-                logger.info("Fix verified OK for %s", path)
-            except SyntaxError as e:
-                logger.warning("Copilot fix STILL HAS ERRORS in %s: %s — skipping", path, e)
-                continue
-
-            fixes[path] = fixed_content
+        fixes = asyncio.run(copilot_fix_all(file_errors, self.oauth_token))
 
         if not fixes:
             logger.warning("No fixes generated. Nothing to commit.")
