@@ -5,9 +5,15 @@ class DataProcessor:
 
     def process(self):
         for record in self.data:
-            # BUG: unmatched bracket
-            cleaned = record["value"].strip().lower().split(" ")[0]
-            self.results.append(cleaned
+            # Normalize input whether it's a string or dict with "value"
+            if isinstance(record, str):
+                source = record
+            elif isinstance(record, dict) and "value" in record:
+                source = record["value"] or ""
+            else:
+                source = str(record)
+            cleaned = source.strip().lower().split()[0] if source.strip() else ""
+            self.results.append(cleaned)
 
     def get_summary(self):
         return {
@@ -18,4 +24,4 @@ class DataProcessor:
 if __name__ == "__main__":
     processor = DataProcessor(["  Hello ", " World ", " hello "])
     processor.process()
-    print(processor.get_summary()asjdaksjd((())(
+    print(processor.get_summary())
