@@ -25,7 +25,7 @@ from typing import Optional
 from github import Github, Auth, GithubException
 from copilot import CopilotClient
 from copilot.session import PermissionHandler
-from copilot.session_events import SessionEventType
+from copilot.session_events import AssistantMessageData, SessionIdleData
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("self-healer")
@@ -77,9 +77,7 @@ def scan_python_files(directory: str) -> list[dict]:
         )
         if proc.returncode != 0:
             err = proc.stderr.strip()
-            # Extract error type and message: "NameError: name 'prin' is not defined"
             err_match = re.search(r"(\w+Error|\w+Exception):\s*(.+)", err)
-            # Extract line number: "  File "test.py", line 1"
             line_match = re.search(r'File "[^"]+", line (\d+)', err)
 
             if err_match:
@@ -133,49 +131,50 @@ async def copilot_fix_all(
     file_errors = { file_path: (file_content, errors) }
     Returns { file_path: fixed_content } for successful fixes only.
     """
-    client = CopilotClient(github_token=oauth_token)
-    await client.start()
     fixes = {}
 
-    try:
-        session = await client.create_session(
+    async with CopilotClient(github_token=oauth_token) as client:
+        async with await client.create_session(
             on_permission_request=PermissionHandler.approve_all,
             model="gpt-5",
-        )
+        ) as session:
 
-        for file_path, (file_content, errors) in file_errors.items():
-            prompt = _build_fix_prompt(file_path, file_content, errors)
-            response_text = ""
+            for file_path, (file_content, errors) in file_errors.items():
+                prompt = _build_fix_prompt(file_path, file_content, errors)
+                done = asyncio.Event()
+                response_text = ""
 
-            def on_event(event):
-                nonlocal response_text
-                if event.type == SessionEventType.ASSISTANT_MESSAGE_DELTA:
-                    response_text += event.data.delta_content
+                def on_event(event):
+                    nonlocal response_text
+                    match event.data:
+                        case AssistantMessageData() as data:
+                            response_text = data.content
+                        case SessionIdleData():
+                            done.set()
 
-            session.on(on_event)
-            await session.send_and_wait(prompt)
+                session.on(on_event)
+                await session.send(prompt)
+                await done.wait()
 
-            cleaned = response_text.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-                cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+                cleaned = response_text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+                    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
 
-            if not cleaned:
-                logger.warning("Copilot returned empty fix for %s — skipping", file_path)
-                continue
+                if not cleaned:
+                    logger.warning("Copilot returned empty fix for %s — skipping", file_path)
+                    continue
 
-            if cleaned.strip() == file_content.strip():
-                logger.warning("Copilot returned UNCHANGED content for %s — skipping", file_path)
-                continue
+                if cleaned.strip() == file_content.strip():
+                    logger.warning("Copilot returned UNCHANGED content for %s — skipping", file_path)
+                    continue
 
-            try:
-                ast.parse(cleaned)
-                logger.info("Fix verified OK for %s", file_path)
-                fixes[file_path] = cleaned
-            except SyntaxError as e:
-                logger.warning("Copilot fix STILL HAS ERRORS in %s: %s — skipping", file_path, e)
-    finally:
-        await client.stop()
+                try:
+                    ast.parse(cleaned)
+                    logger.info("Fix verified OK for %s", file_path)
+                    fixes[file_path] = cleaned
+                except SyntaxError as e:
+                    logger.warning("Copilot fix STILL HAS ERRORS in %s: %s — skipping", file_path, e)
 
     return fixes
 
