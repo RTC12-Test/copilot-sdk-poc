@@ -10,7 +10,7 @@ def process_data(data):
     results = []
     for item in data:
         # BUG: missing closing parenthesis - syntax error
-        result = calculate_average(item["values"]
+        result = calculate_average(item["values"])
         results.append(result)
     return results
 
@@ -20,4 +20,4 @@ if __name__ == "__main__":
         {"name": "batch2", "values": [40, 50, 60]},
     ]
     output = process_data(sample_data)
-    print(f"Results: {output}")()
+    print(f"Results: {output}")
